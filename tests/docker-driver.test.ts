@@ -63,7 +63,7 @@ describe.runIf(RUN_DOCKER)('DockerDriver (CI-only, SSH_EPHEMERAL_DOCKER=1)', () 
       try {
         expect(a.meta.containerId).not.toBe(b.meta.containerId);
         const duplexA = await driver.attach(a, {});
-        duplexA.write('echo secret > /tmp/secret.txt\n');
+        duplexA.write('echo topsecretvalue > /tmp/secret.txt\n');
         await collect(duplexA, 800);
         duplexA.end();
 
@@ -71,7 +71,10 @@ describe.runIf(RUN_DOCKER)('DockerDriver (CI-only, SSH_EPHEMERAL_DOCKER=1)', () 
         duplexB.write('cat /tmp/secret.txt\n');
         const output = await collect(duplexB, 800);
         duplexB.end();
-        expect(output).not.toContain('secret');
+        // The command line itself (echoed back over the tty) legitimately
+        // contains "secret" in the filename — only the file's actual
+        // content proves (or disproves) cross-container leakage.
+        expect(output).not.toContain('topsecretvalue');
       } finally {
         await driver.destroy(a);
         await driver.destroy(b);
