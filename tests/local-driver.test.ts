@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LocalProcessDriver } from '../src/drivers/local.js';
 import type { Sandbox, Template } from '../src/driver.js';
@@ -12,6 +12,15 @@ function collect(duplex: NodeJS.ReadWriteStream, ms = 400): Promise<string> {
     duplex.on('data', (chunk: Buffer) => (out += chunk.toString()));
     setTimeout(() => resolve(out), ms);
   });
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe('LocalProcessDriver', () => {
@@ -62,5 +71,23 @@ describe('LocalProcessDriver', () => {
     await driver.destroy(sb);
     expect(existsSync(sb.meta.tmpDir as string)).toBe(false);
     expect((await driver.list()).find((s) => s.id === sb.id)).toBeUndefined();
+  });
+
+  it('destroy kills descendant processes started inside the sandbox, not just the shell itself', async () => {
+    const sb = await driver.provision(template, 'sess-f');
+    provisioned.push(sb);
+    const duplex = await driver.attach(sb, {});
+    duplex.write('sleep 20 & echo $! > child.pid\n');
+    await collect(duplex, 300);
+
+    const pidText = readFileSync(join(sb.meta.tmpDir as string, 'child.pid'), 'utf8').trim();
+    const childPid = Number(pidText);
+    expect(childPid).toBeGreaterThan(0);
+    expect(isAlive(childPid)).toBe(true);
+
+    await driver.destroy(sb);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(isAlive(childPid)).toBe(false);
   });
 });

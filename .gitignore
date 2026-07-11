@@ -6,8 +6,7 @@ coverage/
 
 # secrets — never commit
 *.pem
-host_key
-host_key.pub
+host_key*
 id_*
 !id_*.md
 .ssh-ephemeral/

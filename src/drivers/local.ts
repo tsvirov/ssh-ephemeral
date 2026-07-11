@@ -50,6 +50,9 @@ export class LocalProcessDriver implements SandboxDriver {
         HOME: entry.tmpDir,
       },
       stdio: 'pipe',
+      // Own process group, so destroy() can kill the whole tree (see below) —
+      // not just this shell, but anything the user started inside it too.
+      detached: true,
     });
     entry.activeProc = child;
 
@@ -87,7 +90,27 @@ export class LocalProcessDriver implements SandboxDriver {
   async destroy(sandbox: Sandbox): Promise<void> {
     const entry = this.entries.get(sandbox.id);
     if (!entry) return;
-    if (entry.activeProc && !entry.activeProc.killed) entry.activeProc.kill();
+    const proc = entry.activeProc;
+    if (proc?.pid) {
+      // Negative pid signals the whole process group (see `detached: true`
+      // above) — a plain `proc.kill()` only killed the shell itself, leaving
+      // anything the user started inside it (e.g. `sleep 30`) running as an
+      // orphan forever after eviction/TTL/SIGTERM.
+      try {
+        process.kill(-proc.pid, 'SIGTERM');
+      } catch {
+        // group already gone
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (entry.activeProc === proc) {
+        // still hasn't exited after SIGTERM — force it
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    }
     await rm(entry.tmpDir, { recursive: true, force: true });
     this.entries.delete(sandbox.id);
   }

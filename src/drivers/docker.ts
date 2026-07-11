@@ -80,8 +80,12 @@ export class DockerDriver implements SandboxDriver {
     const entry = this.entries.get(sandbox.id);
     if (!entry) return;
     const container = this.docker.getContainer(entry.containerId);
+    // kill() on an already-stopped container is expected to error — harmless.
     await container.kill().catch(() => {});
-    await container.remove({ force: true }).catch(() => {});
+    // remove() failing is the real signal of a leak: only drop our own
+    // bookkeeping once the container is actually confirmed gone, so a failed
+    // removal doesn't silently vanish from list() while still running.
+    await container.remove({ force: true });
     this.entries.delete(sandbox.id);
   }
 

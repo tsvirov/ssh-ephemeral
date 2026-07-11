@@ -18,7 +18,19 @@ function ensureHostKey(path: string): Buffer {
   mkdirSync(dirname(path), { recursive: true });
   // ssh2's parseKey only understands its own OpenSSH-format keys for ed25519
   // (Node's PKCS8 PEM output isn't one of them), so generate via ssh2 itself.
-  const { private: privateKey } = sshUtils.generateKeyPairSync('ed25519');
+  // ssh2's generateKeyPairSync occasionally emits a malformed key (observed
+  // directly, low but non-zero rate) — validate before persisting/using it,
+  // and retry rather than starting a server with a host key `new Server()`
+  // will immediately reject.
+  let privateKey: string | undefined;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = sshUtils.generateKeyPairSync('ed25519').private;
+    if (!(sshUtils.parseKey(candidate) instanceof Error)) {
+      privateKey = candidate;
+      break;
+    }
+  }
+  if (!privateKey) throw new Error('failed to generate a valid ed25519 host key after 5 attempts');
   writeFileSync(path, privateKey, { mode: 0o600 });
   return Buffer.from(privateKey);
 }
@@ -26,11 +38,16 @@ function ensureHostKey(path: string): Buffer {
 function keyMatches(authorizedKeyLine: string, ctx: AuthContext & { method: 'publickey' }): boolean {
   const parsed = sshUtils.parseKey(authorizedKeyLine);
   if (!parsed || parsed instanceof Error) return false;
+  // ctx.key.algo is the key-blob TYPE (e.g. "ssh-rsa"), matching parsed.type
+  // directly — it is NOT where the RSA sha2-256/512 signature variant lives.
+  // That's the separate ctx.hashAlgo field, which must be threaded through to
+  // verify() below or a modern client's rsa-sha2-* signature fails to verify
+  // even though the key and signature are both genuinely valid.
   if (ctx.key.algo !== parsed.type) return false;
   const keyBuf = parsed.getPublicSSH();
   if (!keyBuf || Buffer.compare(ctx.key.data, keyBuf) !== 0) return false;
   if (ctx.signature) {
-    return parsed.verify(ctx.blob as Buffer, ctx.signature) === true;
+    return parsed.verify(ctx.blob as Buffer, ctx.signature, ctx.hashAlgo) === true;
   }
   // no signature yet: client is only probing whether this key would be accepted
   return true;
@@ -63,6 +80,8 @@ export function createServer(opts: EphemeralServerOptions): EphemeralServerHandl
     janitorIntervalMs: opts.janitorIntervalMs,
     clock: opts.clock,
     onEvict: (e) => log(`[janitor] ${e.type} sandbox=${e.sandboxId} user=${e.username}`),
+    onEvictError: (err, username, sandboxId) =>
+      log(`[error] destroy() failed for sandbox=${sandboxId} user=${username}: ${err.message}`),
   });
   manager.start();
 
@@ -89,7 +108,10 @@ export function createServer(opts: EphemeralServerOptions): EphemeralServerHandl
 
       const user = usersByName.get(ctx.username);
       if (!user) {
-        ctx.reject();
+        // Same shape as the wrong-key rejection below — an empty methods-left
+        // list here vs ['publickey'] there would let a client fingerprint
+        // which usernames are configured just by probing with 'none' auth.
+        ctx.reject(['publickey']);
         return;
       }
       if (ctx.method !== 'publickey') {

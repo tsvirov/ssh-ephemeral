@@ -19,6 +19,8 @@ export interface SessionManagerOptions {
   janitorIntervalMs?: number;
   clock?: () => number;
   onEvict?: (event: JanitorEvent) => void;
+  /** A destroy() call threw during eviction/shutdown — logged, not fatal. */
+  onEvictError?: (error: Error, username: string, sandboxId: string) => void;
 }
 
 /**
@@ -29,6 +31,11 @@ export interface SessionManagerOptions {
  */
 export class SessionManager {
   private records = new Map<string, Record_>();
+  // Dedupes concurrent connect() calls for the same username (e.g. two SSH
+  // channels opened back-to-back) so only one provision() happens and both
+  // callers get the same sandbox, instead of racing two independent
+  // provisions where the second silently overwrites — and leaks — the first.
+  private pendingConnects = new Map<string, Promise<Sandbox>>();
   private janitorTimer?: NodeJS.Timeout;
   private clock: () => number;
 
@@ -36,10 +43,26 @@ export class SessionManager {
     this.clock = opts.clock ?? (() => Date.now());
   }
 
-  /** Reuses the live sandbox if this user disconnected within grace; otherwise provisions fresh. */
+  /** Reuses the live sandbox if this user disconnected within grace (or is already connected); otherwise provisions fresh. */
   async connect(username: string, template: Template, driver: SandboxDriver): Promise<Sandbox> {
+    const pending = this.pendingConnects.get(username);
+    if (pending) return pending;
+
+    const promise = this.doConnect(username, template, driver);
+    this.pendingConnects.set(username, promise);
+    try {
+      return await promise;
+    } finally {
+      this.pendingConnects.delete(username);
+    }
+  }
+
+  private async doConnect(username: string, template: Template, driver: SandboxDriver): Promise<Sandbox> {
     const existing = this.records.get(username);
-    if (existing && existing.lastDisconnectedAt !== null) {
+    if (existing) {
+      // Either a within-grace reconnect, or a second concurrent session for
+      // the same user (e.g. a second terminal) — either way, reuse rather
+      // than silently clobbering the map entry the first session still owns.
       existing.lastDisconnectedAt = null;
       return existing.sandbox;
     }
@@ -80,19 +103,31 @@ export class SessionManager {
 
   private async sweep(): Promise<void> {
     const now = this.clock();
-    for (const [username, rec] of [...this.records.entries()]) {
+    const toEvict: Array<[string, Record_, JanitorEvent['type']]> = [];
+
+    for (const [username, rec] of this.records) {
       const graceMs = rec.template.reconnectGraceSeconds * 1000;
       const ttlMs = rec.template.maxTtlSeconds * 1000;
       const idleExpired = rec.lastDisconnectedAt !== null && now - rec.lastDisconnectedAt >= graceMs;
       const ttlExpired = now - rec.createdAt >= ttlMs;
       if (idleExpired || ttlExpired) {
-        await rec.driver.destroy(rec.sandbox);
+        // Remove from `records` BEFORE awaiting destroy() below: if a
+        // reconnect races in while teardown is in flight, it must see no
+        // record and provision a fresh sandbox, not reuse the one being
+        // destroyed out from under it.
         this.records.delete(username);
-        this.opts.onEvict?.({
-          type: idleExpired ? 'evicted-idle' : 'evicted-ttl',
-          sandboxId: rec.sandbox.id,
-          username,
-        });
+        toEvict.push([username, rec, idleExpired ? 'evicted-idle' : 'evicted-ttl']);
+      }
+    }
+
+    for (const [username, rec, type] of toEvict) {
+      try {
+        await rec.driver.destroy(rec.sandbox);
+        this.opts.onEvict?.({ type, sandboxId: rec.sandbox.id, username });
+      } catch (err) {
+        // One failing teardown must not stop the rest of the sweep (or crash
+        // the process via an unhandled rejection from the setInterval tick).
+        this.opts.onEvictError?.(err as Error, username, rec.sandbox.id);
       }
     }
   }
@@ -100,9 +135,14 @@ export class SessionManager {
   /** Destroys every live sandbox — used on SIGTERM and in the SIGTERM-equivalent test. */
   async shutdown(): Promise<void> {
     this.stop();
-    for (const rec of this.records.values()) {
-      await rec.driver.destroy(rec.sandbox);
-    }
+    const recs = [...this.records.values()];
     this.records.clear();
+    for (const rec of recs) {
+      try {
+        await rec.driver.destroy(rec.sandbox);
+      } catch (err) {
+        this.opts.onEvictError?.(err as Error, rec.username, rec.sandbox.id);
+      }
+    }
   }
 }

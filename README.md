@@ -19,7 +19,18 @@ npm run build
 ```
 
 No Docker required — the demo runs entirely on the bundled `LocalProcessDriver`.
-See [examples/README.md](examples/README.md) for the real, unedited output.
+Real output (trimmed — flags/timing omitted for width, nothing rewritten):
+
+```
+$ ssh -p 2222 demo@localhost 'echo $SSH_EPHEMERAL_SESSION && whoami'
+demo-1783776161416-1g9wjy
+elenatsvirova
+...
+[janitor] evicted-idle sandbox=demo-1783776161416-1g9wjy user=demo
+```
+
+Full unedited capture (including the reconnect-reuse and fresh-sandbox
+proof): [examples/README.md](examples/README.md).
 
 ## The problem
 
@@ -57,7 +68,7 @@ sequenceDiagram
 
 1. Client connects over SSH.
 2. Server authenticates via `publickey` against the user's configured
-   `authorized_keys` list (or accepts unconditionally in `insecureDemo` mode
+   `keys` list (or accepts unconditionally in `insecureDemo` mode
    — demo/local use only, see `## Security`).
 3. Server looks up the user's `template` in the config.
 4. Server calls `driver.provision()` — `LocalProcessDriver` creates a fresh
@@ -87,13 +98,13 @@ After (real output from `examples/demo.sh`, see [examples/README.md](examples/RE
 ```
 $ ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
     demo@localhost 'echo $SSH_EPHEMERAL_SESSION && whoami'
-demo-1783759578853-wdui15
+demo-1783776161416-1g9wjy
 elenatsvirova
 ```
 
 No `docker rm`, nothing to remember — the sandbox above was gone
 automatically once `reconnectGraceSeconds` plus one janitor sweep had
-elapsed (`[janitor] evicted-idle sandbox=demo-1783759578853-wdui15
+elapsed (`[janitor] evicted-idle sandbox=demo-1783776161416-1g9wjy
 user=demo` in the server log).
 
 ## Install
@@ -103,6 +114,7 @@ git clone https://github.com/tsvirov/ssh-ephemeral.git
 cd ssh-ephemeral
 npm install
 npm run build
+# create ./ssh-ephemeral.yaml first — see ## Config below for a full example
 node dist/cli.js ./ssh-ephemeral.yaml
 ```
 
@@ -140,9 +152,12 @@ Defaults if omitted: `listen.port` 2222, `listen.hostKeyPath`
 ## CLI / usage
 
 ```bash
-ssh-ephemeral [config-path]
+node dist/cli.js [config-path]
 # config-path defaults to ./ssh-ephemeral.yaml, or $SSH_EPHEMERAL_CONFIG if set
 ```
+
+(`ssh-ephemeral` is also declared as a `bin` in package.json — `npm link` or
+a global/dependency install exposes it directly on `PATH` as that command.)
 
 On first start the server generates an ed25519 host key and persists it at
 `listen.hostKeyPath` (see `## Security` for why).
@@ -153,7 +168,7 @@ On first start the server generates an ed25519 host key and persists it at
 |---|---|---|
 | Setup | one YAML file | plugin + auth-backend configuration |
 | Runtimes | local process, Docker | Docker, Kubernetes, and more via plugins |
-| Extensibility | small `SandboxDriver` interface (4 methods) | full plugin system |
+| Extensibility | small `SandboxDriver` interface (5 methods) | full plugin system |
 | Time to first successful connection | minutes | steeper — more moving parts to configure |
 
 ContainerSSH is more powerful — more runtimes, a real plugin ecosystem.
@@ -174,8 +189,9 @@ immediately.
   while it's on, precisely so this doesn't go unnoticed.
 - In production, only `publickey` authentication is supported — there is no
   password auth.
-- Set `memoryMb`/`cpus` on every docker-driver template. Without limits, one
-  user's sandbox can starve the host.
+- `memoryMb`/`cpus` default to 512MB/1 CPU if omitted from a docker-driver
+  template — override them to match your actual workload; the default may
+  still be too generous for hostile multi-tenant use.
 
 ## Limitations
 
@@ -195,7 +211,7 @@ immediately.
 |---|---|
 | No node-pty (native builds are a common source of cross-OS CI breakage) | Not used; plain pipes are enough for the local driver's tests and demo |
 | Docker unavailable on this dev machine | All core logic is tested via `LocalProcessDriver`; `DockerDriver` is exercised only in the CI-only Docker job |
-| Host key / private keys accidentally committed | `.gitignore` excludes `*.pem`, `host_key*`, `id_*`; the generated demo host key is never committed |
+| Host key / private keys accidentally committed | `.gitignore` excludes `*.pem`, `host_key*`, `id_*` (glob, so any custom `hostKeyPath` filename is covered too) |
 
 ## Roadmap (not yet implemented)
 
