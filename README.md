@@ -8,6 +8,12 @@
 
 **`ssh dev@host` — get a brand-new sandbox every time, gone the moment you disconnect.**
 
+![ssh-ephemeral: connect, work, disconnect, gone](examples/showcase.gif)
+
+*(stylized walkthrough — every data point matches the real implementation, see
+[examples/README.md](examples/README.md) for the actual unedited output and
+[examples/showcase.py](examples/showcase.py) for the recording script)*
+
 ## Try it in 60 seconds
 
 ```bash
