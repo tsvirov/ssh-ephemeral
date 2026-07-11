@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+coverage/
+
+# secrets — never commit
+*.pem
+host_key
+host_key.pub
+id_*
+!id_*.md
+.ssh-ephemeral/
